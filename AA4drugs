@@ -1,0 +1,172 @@
+-- ------------------------------------------------------------------
+-- Title: AA(Anti-arrthymic) drugs
+-- Description: data are extracted from medication and infusiondrug table
+-- Each row represents a single drug use
+--  adenosine, lidocaine,  ibutilide, IV amiodarone
+--  
+-- ------------------------------------------------------------------
+
+
+DROP MATERIALIZED VIEW IF EXISTS AA_drugs  CASCADE;
+CREATE MATERIALIZED VIEW AA_drugs  as
+
+-- extract amiodarone usage with loading dose by IV from medication table
+with amiod_med as (
+
+SELECT ICUSTAY_ID
+			, drugorderoffsetH
+			, drugorder_Window
+			, drugname
+			, drug_label 
+from (
+  SELECT  patientunitstayid as ICUSTAY_ID
+			 , drugorderoffset
+			 -- order drug usage time for amiodarone usage in order to get the first drug usage record
+			 , "row_number"() over(PARTITION by ICUSTAY_ID order by drugstartoffset) as first_amio
+			 -- convert drugorderoffset(min) in to drugorderoffsetH(drugorderoffset hours)
+       , round(drugorderoffset::numeric/60::numeric ,2) as drugorderoffsetH 
+			 
+			 -- convert the drugorderoffset into drug order window, 
+			 -- e.g.  0~2 corresponds to first window
+			 --			  2~4 corresponds to second window
+       ,  ceil(drugorderoffset::numeric/120::numeric)  as  drugorder_Window  
+			 
+       , drugname
+			 , dosage
+       , CASE
+             WHEN "lower"(drugname) similar to '%amiodarone%|%cordarone%' THEN 'amiodarone'
+						 else null 
+         END as drug_label
+			 , case when "lower"(routeadmin) similar to'%iv%|inf|%intraven%' then 'IV'
+			        else null
+					end as routeadmin
+	from medication
+	WHERE "lower"(drugname)  similar to '%amiodarone%|%cordarone%'                                              -- Anti-arrythmic drugs
+		AND lower(drugOrderCancelled) like 'no'
+		AND lower(dosage) !~ '^0[^.-](\s)*[^0-9][a-zA-Z]*'	
+		and lower(dosage) != '0'
+		and LOWER(drugname) not SIMILAR to '%each package custom ndc%|%amiodarone hcl 200 mg po tabs|amiodarone
+		\(pacerone\)%tablet%|amiodarone 200 mg%'
+	ORDER BY ICUSTAY_ID
+	)
+where first_amio =1
+and routeadmin ='IV'
+and lower(dosage) similar to '(150|300)%'
+)
+--  get 'adenosine',  'lidocaine', 'ibutilide' drug records from medication table
+, med_drug_AA as (
+
+	SELECT  patientunitstayid as ICUSTAY_ID
+       , round(drugorderoffset::numeric/60::numeric ,2) as drugorderoffsetH 
+       ,  ceil(drugorderoffset::numeric/120::numeric)  as  drugorder_Window   
+       , drugname
+       , CASE
+             WHEN "lower"(drugname) similar to '%lidocaine%|%xylocaine%' and "lower"(routeadmin) similar to'%iv%|inf|%intraven%'   
+						 THEN 'lidocaine'     -- %subq%
+						 WHEN "lower"(drugname) similar to '%adenosine%|%adenocard%|%adenoscan%'  THEN 'adenosine'
+						 WHEN "lower"(drugname) similar to '%ibutilide%|%corvert%'  THEN 'ibutilide'
+						 else null 
+         END as drug_label
+	from medication
+	WHERE "lower"(drugname)  similar to '%lidocaine%|%xylocaine%|%adenosine%|%adenocard%|%adenoscan%|%ibutilide%|%corvert%'                                           -- Anti-arrythmic drugs
+		AND lower(drugOrderCancelled) like 'no'
+		AND lower(dosage) !~ '^0[^.-](\s)*[^0-9][a-zA-Z]*'	
+		and lower(dosage) != '0'
+	ORDER BY 
+		ICUSTAY_ID
+)
+-- extract data from infusion drug table
+, infu_drug_AA as (
+	SELECT  patientunitstayid as ICUSTAY_ID
+       , round(infusionoffset::numeric/60::numeric ,2) as drugorderoffsetH 
+       , ceil(infusionoffset::numeric/120::numeric)  as  drugorder_Window  -- window for drug order in  
+       , drugname
+       , CASE
+             WHEN "lower"(drugname) similar to '%lidocaine%|%xylocaine%'    THEN 'lidocaine'     -- %subq%
+						 WHEN "lower"(drugname) similar to '%adenosine%|%adenocard%|%adenoscan%'  THEN 'adenosine'
+						 WHEN "lower"(drugname) similar to '%ibutilide%|%corvert%'  THEN 'ibutilide' 
+						 else null 
+         END as drug_label
+	from infusiondrug
+	WHERE "lower"(drugname)  similar to 
+	'%lidocaine%|%xylocaine%|%amiodarone%|%cordarone%|%adenosine%|%adenocard%|%adenoscan%|%ibutilide%|%corvert%'
+   -- Anti-arrythmic drugs
+	AND drugrate ~ '^[0-9.]{1,8}$' 
+				AND drugrate <> '.' 
+				AND drugrate <> ''
+	ORDER BY ICUSTAY_ID
+)
+
+, com_drugAA as (
+  SELECT  ICUSTAY_ID
+	      , drugorderoffsetH
+				, orderWindow
+				, drugname
+				, drug_label
+		from (
+		SELECT icustay_id 
+	      , drugorderoffsetH
+				, (2*drugorder_Window)-1 as drugorder_Window  
+				, drugname
+				, case 
+				-- exclude  inappropriate records for description of lidocaine drugname
+				WHEN "lower"(drug_label) = 'lidocaine' and LOWER(drugname) SIMILAR to '%lidocaine hcl%(1|2|4)( \%|\%)%|%lidocaine( 10 mg/ml \(| )(1|2)( \%|\%|gm)%(mg|ml|syr|inj|soln|hcl)%|lidocaine \(pf\)%(1|2)( \%|\%)%(iv|inj)%|(30|5)%lidocaine \(pf\)%(1|2)( \%|\%)%(iv|inj)%|%xylocaine (m|2)%'   then null
+					else drug_label
+				end as drug_label
+	FROM med_drug_AA
+		)as m 
+	where drug_label is not null
+	UNION (
+	SELECT  ICUSTAY_ID
+	      , drugorderoffsetH
+				, (2*drugorder_Window)-1 as drugorder_Window
+				, drugname
+				, drug_label
+		from infu_drug_AA
+	  where drug_label is not null
+	)
+	union (
+	SELECT  ICUSTAY_ID
+	      , drugorderoffsetH
+				, (2*drugorder_Window)-1 as drugorder_Window
+				, drugname
+				, drug_label
+		from amiod_med
+	where drug_label is not null
+	)
+order by ICUSTAY_ID, drug_label, drugname
+)
+, drug_AA_1st as (
+  SELECT  ICUSTAY_ID
+       , drugorderoffsetH
+       , drugorder_Window
+			 , drug_label
+        -- oder drug order time
+       , row_number() OVER (PARTITION BY ICUSTAY_ID ORDER BY drugorderoffsetH) AS first_drugOrder     
+	from com_drugAA
+	where drug_label in (
+	     'adenosine', 'lidocaine',  'ibutilide', 'amiodarone'
+	)
+  ORDER BY  ICUSTAY_ID
+)
+ 
+SELECT  ftr.ICUSTAY_ID
+    	, daa.drugorderoffsetH
+      , daa.drugorder_Window
+			, daa.drug_label
+	from AAbasicinfo_allICU ftr
+ inner join drug_AA_1st  daa 
+       on ftr.ICUSTAY_ID = daa.icustay_id 
+where  first_drugOrder = 1
+GROUP BY 
+				ftr.ICUSTAY_ID
+    	, daa.drugorderoffsetH
+      , daa.drugorder_Window
+			, daa.drug_label
+  order by 
+				ftr.ICUSTAY_ID
+    	, daa.drugorderoffsetH
+      , daa.orderWindow
+			, first_drugOrder
+
+
