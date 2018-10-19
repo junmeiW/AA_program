@@ -1,0 +1,56 @@
+-- ------------------------------------------------------------------  
+-- Title: max potassium
+-- Description: Extracts patient unique identifier,labresultoffsetH 
+--              max potassium value in each two hours when in icu stay
+-- ------------------------------------------------------------------  
+
+
+DROP MATERIALIZED VIEW IF EXISTS maxPotassium CASCADE;
+CREATE MATERIALIZED VIEW maxPotassium as(
+
+with Potassium as(
+	SELECT  patientunitstayid as ICUSTAY_ID
+      , labid
+      -- convert labresultoffset(min) in to labresultoffsetH(labresultoffset hours)
+      , round(labresultoffset::numeric/60::numeric,2) as labresultoffsetH
+      , lab.labname
+      , lab.labresult
+      , lab.labresulttext
+			-- convert the time into time_window, 
+			-- e.g.  0~2 corresponds to first window
+			--			 2~4 corresponds to second window																		
+      , ceil((labresultoffset::numeric/120::numeric)) as potassium_Window-- (floor(labresultoffset::numeric/120::numeric)+1) 
+	from lab
+	WHERE lower(lab.labname) like 'potassium'
+	      and lab.labresult is not null
+				AND labresultoffset >= 0
+)
+
+SELECT  mp.*
+ FROM (
+	SELECT  ICUSTAY_ID
+      , labresultoffsetH
+      , labname
+      , labresult
+      -- label the window by odd number
+      -- e.g. 0~2   window:1
+      --      2~4   window:3
+      , (2* potassium_Window)-1 as potassium_Window 
+      -- get the max potaasium value within the current observation window
+      , row_number() OVER (PARTITION BY pt.ICUSTAY_ID, pt.potassium_Window ORDER BY pt.labresult DESC) AS maxPota
+from Potassium pt
+		) mp
+WHERE maxPota = 1
+GROUP BY ICUSTAY_ID
+      , labresultoffsetH
+      , labname
+      , labresult
+      ,  potassium_Window 
+      ,  maxPota
+ORDER BY ICUSTAY_ID, potassium_Window
+);
+
+-- 180473 ICUSTAY_IDs
+
+
+
